@@ -76,7 +76,7 @@ class MyDataset(Dataset):
             label = F.pad(token, (0, pad_len), value=-100)
             x = dix[:-1]
             y = label[1:]
-        # ================= 新增的 DPO 专属数据流 =================
+        # ================= DPO 专属数据流 =================
         elif args.data_type == "dpo":
             ctx_len = args.ctx_len
             req_len = ctx_len + 1
@@ -92,35 +92,42 @@ class MyDataset(Dataset):
             full_chosen = prompt_tokens + chosen_tokens
             full_rejected = prompt_tokens + rejected_tokens
 
+            # 截断
             full_chosen = full_chosen[:req_len]
             full_rejected = full_rejected[:req_len]
 
-            p_len = min(len(prompt_tokens), req_len)
-            chosen_mask = [0]*p_len + [1]*(len(full_chosen) - p_len)
-            rejected_mask = [0]*p_len + [1]*(len(full_rejected) - p_len)
-
+            # 辅助函数：将 seq 转换为 tensor 并 padding
             def pad_seq(seq, length, pad_val):
                 seq = torch.tensor(seq, dtype=torch.long)
                 if len(seq) < length:
                     return F.pad(seq, (0, length - len(seq)), value=pad_val)
                 return seq
 
+            # 1. 处理输入的 X (Padding 用 0)
             chosen_pad = pad_seq(full_chosen, req_len, 0)
             reject_pad = pad_seq(full_rejected, req_len, 0)
             
-            chosen_mask_pad = pad_seq(chosen_mask, req_len, 0)
-            reject_mask_pad = pad_seq(rejected_mask, req_len, 0)
+            # 2. 处理标签的 Y (构造 labels，Prompt 掩码设为 -100)
+            p_len = min(len(prompt_tokens), req_len)
+            
+            chosen_labels = full_chosen.copy()
+            chosen_labels[:p_len] = [-100] * p_len
+            
+            reject_labels = full_rejected.copy()
+            reject_labels[:p_len] = [-100] * p_len
 
-            # DPO 返回字典格式，包含正负样本
+            # Labels 的 Padding 也用 -100
+            chosen_labels_pad = pad_seq(chosen_labels, req_len, -100)
+            reject_labels_pad = pad_seq(reject_labels, req_len, -100)
+
+            # 返回错位后的 x 和 y (去掉了单独的 mask 返回)
             return {
                 "chosen_x": chosen_pad[:-1], 
-                "chosen_y": chosen_pad[1:], 
-                "chosen_mask": chosen_mask_pad[1:],
+                "chosen_y": chosen_labels_pad[1:], 
                 "reject_x": reject_pad[:-1], 
-                "reject_y": reject_pad[1:], 
-                "reject_mask": reject_mask_pad[1:]
+                "reject_y": reject_labels_pad[1:]
             }
-            
+
         else:
             ctx_len = args.ctx_len
             req_len = ctx_len + 1

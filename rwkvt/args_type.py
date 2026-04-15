@@ -56,6 +56,9 @@ class TrainingArgs:
     my_exit: int = 99999999
     my_exit_tokens: int = 0
     peft: str = "none"
+    # ============= 新增DPO =============
+    peft_config: str = "{}" 
+    dpo_beta: float = 0.1
     train_parts: List[str] = field(default_factory=lambda: ["time", "ln"])
     l2warp_sparse: int = 0
     lora_config: Dict = field(default_factory=lambda: json.loads(

@@ -214,7 +214,7 @@ if __name__ == "__main__":
         pass
 
 
-    assert args.data_type in ["utf-8", "utf-16le", "numpy", "binidx", "dummy", "uint16", "sft", 'jsonl']
+    assert args.data_type in ["utf-8", "utf-16le", "numpy", "binidx", "dummy", "uint16", "sft", 'jsonl','dpo']
 
     if args.lr_final == 0 or args.lr_init == 0:
         rank_zero_info("\n\nNote: lr_final = 0 or lr_init = 0. Using linear LR schedule instead.\n\n")

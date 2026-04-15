@@ -170,18 +170,20 @@ class RWKV(pl.LightningModule):
             return cfg.get("offload_optimizer") or cfg.get("offload_param")
         return False
 
-    def get_batch_logps(self, logits, labels, mask):
+    def get_batch_logps(self, logits, labels):
         """
-        计算序列在有效 Mask 范围内的 Log Probabilities 求和 (DPO专用)
+        计算序列对数概率，自动利用 labels 中的 -100 作为掩码
         """
-        log_probs = F.log_softmax(logits, dim=-1)
-        labels_unsqueezed = labels.unsqueeze(-1)
-        
-        # 防止 target 中的 -100 导致 gather 越界报错 
-        safe_labels = labels_unsqueezed.clone()
+        # 利用 labels != -100 自动生成 0/1 mask
+        mask = (labels != -100).float()   
+        log_probs = F.log_softmax(logits, dim=-1)    
+        # 将 -100 替换为 0 以防 gather 时越界报错 (反正最终会乘上 mask 被置零)
+        safe_labels = labels.clone()
         safe_labels[safe_labels == -100] = 0
-        
+        safe_labels = safe_labels.unsqueeze(-1) 
+        # 取出预测正确位置的对数概率
         token_logps = log_probs.gather(-1, safe_labels).squeeze(-1)
+        # 乘上 mask 并对序列长度求和
         token_logps = token_logps * mask
         return token_logps.sum(dim=-1)
     
@@ -247,43 +249,46 @@ class RWKV(pl.LightningModule):
         def training_step(self, batch, batch_idx):
             args = self.args
             
-            # ================= 新增的 DPO 训练分支 =================
+            # ================= DPO 训练分支 =================
             if args.data_type == 'dpo':
-                chosen_x, chosen_y, chosen_mask = batch["chosen_x"], batch["chosen_y"], batch["chosen_mask"]
-                reject_x, reject_y, reject_mask = batch["reject_x"], batch["reject_y"], batch["reject_mask"]
+                chosen_x, chosen_y = batch["chosen_x"], batch["chosen_y"]
+                reject_x, reject_y = batch["reject_x"], batch["reject_y"]
                 
-                # 1. Policy 前向
+                # 1. 策略模型 (Policy) 前向传播
                 policy_chosen_logits = self(chosen_x)
                 policy_reject_logits = self(reject_x)
                 
-                policy_chosen_logps = self.get_batch_logps(policy_chosen_logits, chosen_y, chosen_mask)
-                policy_reject_logps = self.get_batch_logps(policy_reject_logits, reject_y, reject_mask)
+                policy_chosen_logps = self.get_batch_logps(policy_chosen_logits, chosen_y)
+                policy_reject_logps = self.get_batch_logps(policy_reject_logits, reject_y)
                 
-                # 2. Reference 前向 (关闭 LoRA)
+                # 2. 参考模型 (Reference) 前向传播 (通过关闭 PEFT 适配器实现)
                 with self.model.disable_adapter(): 
                     with torch.no_grad():
                         ref_chosen_logits = self(chosen_x)
                         ref_reject_logits = self(reject_x)
                         
-                        ref_chosen_logps = self.get_batch_logps(ref_chosen_logits, chosen_y, chosen_mask)
-                        ref_reject_logps = self.get_batch_logps(ref_reject_logits, reject_y, reject_mask)
+                        ref_chosen_logps = self.get_batch_logps(ref_chosen_logits, chosen_y)
+                        ref_reject_logps = self.get_batch_logps(ref_reject_logits, reject_y)
                 
-                # 3. 计算 Loss
-                beta = getattr(args, 'dpo_beta', 0.1) # 默认 beta=0.1
+                # 3. 计算 DPO 损失
+                beta = getattr(args, 'dpo_beta', 0.1) # KL惩罚系数
                 
                 pi_logratios = policy_chosen_logps - policy_reject_logps
                 ref_logratios = ref_chosen_logps - ref_reject_logps
                 logits_diff = pi_logratios - ref_logratios
+                
+                # 标准 DPO Loss
                 loss = -F.logsigmoid(beta * logits_diff).mean()
                 
-                # 记录指标到 logger
+                # 记录核心指标，方便 WandB 或 TensorBoard 监控
                 self.log("dpo/loss", loss, prog_bar=True, sync_dist=True)
                 self.log("dpo/chosen_reward", (beta * (policy_chosen_logps - ref_chosen_logps)).mean(), sync_dist=True)
                 self.log("dpo/reject_reward", (beta * (policy_reject_logps - ref_reject_logps)).mean(), sync_dist=True)
+                self.log("dpo/reward_margins", (beta * logits_diff).mean(), sync_dist=True)
                 
                 return loss
 
-            # ================= 原有的 SFT 分支 (向后兼容) =================
+            # ================= 原有的 SFT 分支 =================
             elif args.data_type == 'sft':
                 idx, targets, mask = batch
                 logits = self(idx, mask)            
