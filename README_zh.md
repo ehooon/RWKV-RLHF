@@ -16,7 +16,7 @@ RWKV-RLHF
 建议使用 Python 3.10 及以上版本。
 
 ```bash
-git clone [https://github.com/ehooon/RWKV-RLHF.git](https://github.com/ehooon/RWKV-RLHF.git)
+git clone https://github.com/ehooon/RWKV-RLHF.git
 cd RWKV-RLHF
 uv sync  # 或者使用 pip install .
 ```
