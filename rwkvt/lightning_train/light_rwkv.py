@@ -170,6 +170,21 @@ class RWKV(pl.LightningModule):
             return cfg.get("offload_optimizer") or cfg.get("offload_param")
         return False
 
+    def get_batch_logps(self, logits, labels, mask):
+        """
+        计算序列在有效 Mask 范围内的 Log Probabilities 求和 (DPO专用)
+        """
+        log_probs = F.log_softmax(logits, dim=-1)
+        labels_unsqueezed = labels.unsqueeze(-1)
+        
+        # 防止 target 中的 -100 导致 gather 越界报错 
+        safe_labels = labels_unsqueezed.clone()
+        safe_labels[safe_labels == -100] = 0
+        
+        token_logps = log_probs.gather(-1, safe_labels).squeeze(-1)
+        token_logps = token_logps * mask
+        return token_logps.sum(dim=-1)
+    
     if os.environ.get("RWKV_TRAIN_TYPE") == 'infctx':
         def forward(self, idx,  last_shift_states: torch.Tensor,
                 last_wkv_states: torch.Tensor, attention_mask=None):
@@ -231,16 +246,55 @@ class RWKV(pl.LightningModule):
     else:
         def training_step(self, batch, batch_idx):
             args = self.args
-            if args.data_type=='sft':
+            
+            # ================= 新增的 DPO 训练分支 =================
+            if args.data_type == 'dpo':
+                chosen_x, chosen_y, chosen_mask = batch["chosen_x"], batch["chosen_y"], batch["chosen_mask"]
+                reject_x, reject_y, reject_mask = batch["reject_x"], batch["reject_y"], batch["reject_mask"]
+                
+                # 1. Policy 前向
+                policy_chosen_logits = self(chosen_x)
+                policy_reject_logits = self(reject_x)
+                
+                policy_chosen_logps = self.get_batch_logps(policy_chosen_logits, chosen_y, chosen_mask)
+                policy_reject_logps = self.get_batch_logps(policy_reject_logits, reject_y, reject_mask)
+                
+                # 2. Reference 前向 (关闭 LoRA)
+                with self.model.disable_adapter(): 
+                    with torch.no_grad():
+                        ref_chosen_logits = self(chosen_x)
+                        ref_reject_logits = self(reject_x)
+                        
+                        ref_chosen_logps = self.get_batch_logps(ref_chosen_logits, chosen_y, chosen_mask)
+                        ref_reject_logps = self.get_batch_logps(ref_reject_logits, reject_y, reject_mask)
+                
+                # 3. 计算 Loss
+                beta = getattr(args, 'dpo_beta', 0.1) # 默认 beta=0.1
+                
+                pi_logratios = policy_chosen_logps - policy_reject_logps
+                ref_logratios = ref_chosen_logps - ref_reject_logps
+                logits_diff = pi_logratios - ref_logratios
+                loss = -F.logsigmoid(beta * logits_diff).mean()
+                
+                # 记录指标到 logger
+                self.log("dpo/loss", loss, prog_bar=True, sync_dist=True)
+                self.log("dpo/chosen_reward", (beta * (policy_chosen_logps - ref_chosen_logps)).mean(), sync_dist=True)
+                self.log("dpo/reject_reward", (beta * (policy_reject_logps - ref_reject_logps)).mean(), sync_dist=True)
+                
+                return loss
+
+            # ================= 原有的 SFT 分支 (向后兼容) =================
+            elif args.data_type == 'sft':
                 idx, targets, mask = batch
                 logits = self(idx, mask)            
+                loss = self.criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
+                return L2Wrap.apply(loss, logits)
                 
             else:
                 idx, targets = batch
                 logits = self(idx)
-            loss = self.criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
-            
-            return L2Wrap.apply(loss, logits)
+                loss = self.criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
+                return L2Wrap.apply(loss, logits)
     
     
     def training_step_end(self, batch_parts):

@@ -31,7 +31,7 @@ class MyDataset(Dataset):
         if args.data_type == "sft":
             self.data = sft_dataset(args)
 
-        elif args.data_type == "jsonl":
+        elif args.data_type == "jsonl" or args.data_type == "dpo":
             with jsonlines.open(args.data_file) as file:
                 self.data = list(file)
             if args.epoch_steps < len(self.data) :
@@ -76,7 +76,51 @@ class MyDataset(Dataset):
             label = F.pad(token, (0, pad_len), value=-100)
             x = dix[:-1]
             y = label[1:]
+        # ================= 新增的 DPO 专属数据流 =================
+        elif args.data_type == "dpo":
+            ctx_len = args.ctx_len
+            req_len = ctx_len + 1
+            
+            prompt_text = self.data[idx]['prompt']
+            chosen_text = self.data[idx]['chosen']
+            rejected_text = self.data[idx]['rejected']
 
+            prompt_tokens = pipeline.encode(prompt_text)
+            chosen_tokens = pipeline.encode(chosen_text)
+            rejected_tokens = pipeline.encode(rejected_text)
+
+            full_chosen = prompt_tokens + chosen_tokens
+            full_rejected = prompt_tokens + rejected_tokens
+
+            full_chosen = full_chosen[:req_len]
+            full_rejected = full_rejected[:req_len]
+
+            p_len = min(len(prompt_tokens), req_len)
+            chosen_mask = [0]*p_len + [1]*(len(full_chosen) - p_len)
+            rejected_mask = [0]*p_len + [1]*(len(full_rejected) - p_len)
+
+            def pad_seq(seq, length, pad_val):
+                seq = torch.tensor(seq, dtype=torch.long)
+                if len(seq) < length:
+                    return F.pad(seq, (0, length - len(seq)), value=pad_val)
+                return seq
+
+            chosen_pad = pad_seq(full_chosen, req_len, 0)
+            reject_pad = pad_seq(full_rejected, req_len, 0)
+            
+            chosen_mask_pad = pad_seq(chosen_mask, req_len, 0)
+            reject_mask_pad = pad_seq(rejected_mask, req_len, 0)
+
+            # DPO 返回字典格式，包含正负样本
+            return {
+                "chosen_x": chosen_pad[:-1], 
+                "chosen_y": chosen_pad[1:], 
+                "chosen_mask": chosen_mask_pad[1:],
+                "reject_x": reject_pad[:-1], 
+                "reject_y": reject_pad[1:], 
+                "reject_mask": reject_mask_pad[1:]
+            }
+            
         else:
             ctx_len = args.ctx_len
             req_len = ctx_len + 1
