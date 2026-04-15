@@ -1,194 +1,106 @@
-
 <h1 align="center">
-  <p><img src="assert/logo.jpg" alt="RWKV-PEFT" width="60px"  style="vertical-align: middle; margin-right: 10px;"/>RWKV-PEFT</p>
+RWKV-RLHF
 </h1>
 
-\[ English | [中文](README_zh.md) \]
+<p align="center">
+  <strong>English</strong> | <a href="README_zh.md">中文</a>
+</p>
 
-RWKV-PEFT is the official implementation for efficient parameter fine-tuning of RWKV models, supporting various advanced fine-tuning methods across multiple hardware platforms.
+> This project is a secondary development based on [RWKV-PEFT](https://github.com/Joluck/RWKV-PEFT), focusing on DPO (Direct Preference Optimization) preference alignment training for RWKV models.
+> This project also supports all the fine-tuning features of the original project (such as LoRA / MiSS / State Tuning, etc.). For more details, please refer to the upstream official repository.
 
-# Recent updates
-## Support [huggingface/PEFT](https://github.com/huggingface/peft)
-You only need to check the usage examples of different methods in **PEFT**, then input the corresponding **name** and **config** correctly 
+> 2026.04.15: Completed the construction of the DPO training framework.
 
-`LoRA:`
-```
---peft lora --peft_config '{"r":8,"lora_alpha":32,"lora_dropout":0.05}'
-```
-`MiSS:`
-```
---peft miss --peft_config '{"r":8}'
-```
-> [!IMPORTANT]
-> state tuning 
-```
---peft state --op fla
-```
+## Installation Environment
 
-
-## MiSS: Revisiting the Trade-off in LoRA with an Efficient Shard-Sharing Structure [Paper](https://arxiv.org/pdf/2409.15371)
-The method **Bone/DiSHA** has been officially renamed to **MiSS**.
-You can easily use it within **PEFT** (you’ll still see “Bone” for now, but it will be removed in future versions, so please use **MiSS** instead).
-
-
-
-# Installation
-
-> [!IMPORTANT]
-> Installation is mandatory.
+Python 3.10 or higher is recommended.
 
 ```bash
-git clone https://github.com/JL-er/RWKV-PEFT.git
-cd RWKV-PEFT
-uv sync   or  pip install .
+git clone [https://github.com/ehooon/RWKV-RLHF.git](https://github.com/ehooon/RWKV-RLHF.git)
+cd RWKV-RLHF
+uv sync  # or use `pip install .`
 ```
 
-## Table of Contents
-- [Hardware Requirements](#hardware-requirements)
-- [Quick Start](#quick-start)
-- [Main Features](#main-features)
-- [Detailed Configuration](#detailed-configuration)
-- [GPU Support](#gpu-support)
-- [Citation](#citation)
+## DPO Usage Guide
 
-## Hardware Requirements
+### Data Format Requirements
+Use standard **JSONL** format data. Each line must be a valid JSON object containing the following 3 fields:
+```json
+{"prompt": "User input/question content", "chosen": "Preferred response expected from the model", "rejected": "Low-quality response the model should avoid"}
+```
 
-### RWKV-7 Models
-
-Below is the RWKV-7 model fine-tuned video memory requirement data, tested with RTX 4090 (24GB video memory) + 64GB RAM, based on the following parameter configurations:
-
-- Training precision: BF16
-- `--strategy deepspeed_stage_1`
-- `--ctx_len 1024`
-- `--micro_bsz 1`
-- `--lora_r 64` or `disha_config='{"mode":"bone","r":32}'`
-
-| Model Parameters | State Tuning | LoRA | DiSHA | PiSSA |
-|------------------|--------------|------|-------|-------|
-| RWKV7-0.1B       | 2.6 GB       | 2.7 GB  | 2.7 GB   | 2.6 GB   |
-| RWKV7-0.4B       | 3.1 GB       | 3.4 GB  | 3.1 GB   | 3.4 GB   |
-| RWKV7-1.5B       | 5.3 GB       | 5.6 GB  | 5.6 GB   | 5.6 GB   |
-| RWKV7-3B         | 8.2 GB       | 8.8 GB  | 8.8 GB   | 8.8 GB   |
-
-<details>
-<summary>🔍 <b>Click to view the VRAM requirements for quantized training of RWKV-7 models</b> </summary>
-
-### INT8 VRAM Requirements
-
-| Model Parameters | State Tuning | LoRA | DiSHA | PiSSA |
-|------------------|--------------|------|-------|-------|
-| RWKV7-0.1B       | 2.4 GB       | 2.5 GB  | 2.5 GB   | 2.5 GB   |
-| RWKV7-0.4B       | 2.9 GB       | 2.9 GB  | 2.9 GB   | 3.0 GB   |
-| RWKV7-1.5B       | 4.1 GB       | 4.6 GB  | 4.5 GB   | 4.6 GB   |
-| RWKV7-3B         | 5.7 GB       | 6.7 GB  | 6.7 GB   | 6.7 GB   |
-
-### NF4 VRAM Requirements
-
-| Model Parameters | State Tuning | LoRA | DiSHA | PiSSA |
-|------------------|--------------|------|-------|-------|
-| RWKV7-0.1B       | 2.5 GB       | 2.4 GB  | 2.4 GB   | 2.4 GB   |
-| RWKV7-0.4B       | 2.8 GB       | 2.7 GB  | 2.7 GB   | 2.7 GB   |
-| RWKV7-1.5B       | 3.7 GB       | 3.9 GB  | 3.9 GB   | 3.9 GB   |
-| RWKV7-3B         | 4.7 GB       | 5.7 GB  | 5.7 GB   | 5.7 GB   |
-
-</details>
-
-<details>
-<summary>🔍 <b>Click to view the VRAM requirements of RWKV-6 models</b> </summary>
-
-
-The following shows memory usage when using an RTX 4090 (24GB VRAM) + 64GB RAM (with parameters: `--strategy deepspeed_stage_1 --ctx_len 1024 --micro_bsz 1 --lora_r 64`):
-
-|   Model Size   | Full Finetuning | LoRA/PISSA | QLoRA/QPISSA | State Tuning |
-|---------------|-----------------|------------|--------------|--------------|
-| RWKV6-1.6B    | OOM            | 7.4 GB      | 5.6 GB        | 6.4 GB        |
-| RWKV6-3B      | OOM            | 12.1 GB     | 8.2 GB        | 9.4 GB        |
-| RWKV6-7B      | OOM            | 23.7 GB*    | 14.9 GB**     | 18.1 GB       |
-
-Note:
-* OOM when batch size is 8
-** Requires 19.5GB VRAM when batch size is 8
-
-</details>
-
-## Quick Start
-
-1. Install dependencies:
+### Training Startup Example
+Refer to the `scripts/dpo.sh` script. Parameters can be adjusted based on your actual machine configuration and the table below (using the 1.5B model as an example here):
 ```bash
-pip install -r requirements.txt
+load_model="/path/to/your/rwkv-base-model.pth"
+proj_dir="/path/to/save/output"
+data_file="/path/to/your/dpo-data.jsonl"
+
+# Model parameters (using 1.5B as an example)
+n_layer=24 
+n_embd=2048
+
+# Training parameters
+micro_bsz=8
+epoch_save=1
+epoch_steps=200
+ctx_len=1024
+dpo_beta=0.1
+
+python train.py --load_model $load_model \
+    --proj_dir $proj_dir --data_file $data_file \
+    --vocab_size 65536 \
+    --data_type dpo \
+    --n_layer $n_layer --n_embd $n_embd \
+    --ctx_len $ctx_len --micro_bsz $micro_bsz \
+    --epoch_steps $epoch_steps --epoch_count 3 --epoch_save $epoch_save \
+    --lr_init 5e-6 --lr_final 5e-6 \
+    --accelerator gpu --precision bf16 \
+    --devices 1 --strategy deepspeed_stage_1 --grad_cp 1 \
+    --my_testing "x070" \
+    --peft lora --peft_config '{"r":8,"lora_alpha":32,"lora_dropout":0.05}' \
+    --dpo_beta $dpo_beta
 ```
 
-2. Run example script:
-```bash
-sh scripts/run_lora.sh
-```
-Note: Please refer to the RWKV official tutorial for detailed data preparation
+### Parameter Description
 
+| Parameter | Description | Default |
+|------|------|--------|
+| `--data_type dpo` | **Required**. Set to `dpo` to enable DPO training mode. | - |
+| `--dpo_beta` | DPO beta coefficient, controls the alignment strength, usually between `0.05 - 0.2`. | `0.1` |
+| `--peft` | **Required**. Supports fine-tuning methods like `lora`, `miss`, `state`, etc. For full fine-tuning, set to `none`. Using State Tuning requires the `--op fla` parameter. | - |
+| `--merge` | Whether to automatically merge the PEFT adapter into a full model after training (`1` for auto-merge, `0` for no merge). | `1` |
 
-## Main Features
+### Common Model Parameters Reference
+When configuring the training script, please accurately fill in the corresponding `n_layer` and `n_embd` parameters based on the size of the base model you are using:
 
-- **Multiple Fine-tuning Methods**: Supports LoRA, PISSA, Bone, State Tuning, etc.
-- **Quantized Training**: Supports INT8/NF4 quantization for significant VRAM reduction
-- **Flexible Data Loading**: Supports various data sampling strategies 
-- **Memory Optimization**: Multiple DeepSpeed strategies available
-- **Loss Masking**: Supports loss masking for QA dialogue and padding
-- **Infinite Context Training**: Supports infctx training mode, utilizing RWKV's constant memory usage advantage to train with "infinite" context under limited resources
-- **Multi-Hardware Support**: RWKV-PEFT officially supports NVIDIA, AMD, Moore Threads, Musa, Iluvatar CoreX, and other hardware platforms. Ascend NPU implementation will be available later. Note: Currently we only support issues for NVIDIA hardware
-- **RWKV-FLA Efficient Training**: rwkv-fla is a Triton-based linear attention operator that can run efficiently on hardware without CUDA support
+| Model Size | n_layer | n_embd |
+| :--- | :--- | :--- |
+| **0.1B** | 12 | 768 |
+| **0.4B** | 24 | 1024 |
+| **1.5B** | 24 | 2048 |
+| **3B** | 32 | 2560 |
+| **7B** | 32 | 4096 |
+| **14B** | 61 | 4096 |
 
-## Detailed Configuration
+### Model Output
+- During training, the model will be automatically saved to the directory specified by `--proj_dir` after each epoch.
+- By default (`--merge 1`), the script will automatically merge the PEFT adapter with the base model, outputting a full RWKV format model that can be used directly for inference.
+- If `--merge 0` is set, only the adapter parameters will be saved in the `{proj_dir}-adapter` directory.
 
-###  PEFT Method Selection
-```bash
---peft lora --peft_config '{"r":8,"lora_alpha":32,"lora_dropout":0.05}'
-```
-[state,lora,miss]
+## Acknowledgements and Citation
 
+If you use content contributed by RWKV-PEFT, please cite or acknowledge it. For details, please refer to the original [RWKV-PEFT](https://github.com/Joluck/RWKV-PEFT) project.
 
+If you use the relevant contributions of this project in your academic research, please use the following BibTeX format for citation:
 
-### Infinite Length Training (infctx)
-```bash
---train_type infctx --chunk_ctx 512 --ctx_len 2048
-```
-- ctx_len: Target training length
-- chunk_ctx: Slice length, must be smaller than ctx_len
-
-
-
-### DeepSpeed Strategy
-```bash
---strategy deepspeed_stage_1
-```
-Available strategies:
-- deepspeed_stage_1: Preferred option
-- deepspeed_stage_2/3: For large models or full fine-tuning
-- deepspeed_stage_2_offload
-- deepspeed_stage_3_offload
-
-###  Operator
-By default, RWKV-PEFT uses custom CUDA kernels for wkv computation.
-However, you can use `--op fla` to enable the Triton kernel:
-```
---op cuda/fla
-```
-
-## GPU Support
-
-- NVIDIA: CUDA
-- Intel, Moore Threads, Musa, Iluvatar CoreX: FLA, which means you need to pass `--fla`
-- Ascend: CANN (soon)
-
-## Citation
-
-If you find this project helpful, please cite our work:
-```bib
-@misc{kang2025missrevisitingtradeofflora,
-      title={MiSS: Revisiting the Trade-off in LoRA with an Efficient Shard-Sharing Structure}, 
-      author={Jiale Kang and Qingyu Yin},
-      year={2025},
-      eprint={2409.15371},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2409.15371}, 
-
+```bibtex
+@misc{rwkvrlhf,
+  author       = {Yinhong Fan},
+  title        = {RWKV-RLHF: RLHF for RWKV Models base on RWKV-PEFT},
+  year         = {2026},
+  publisher    = {GitHub},
+  journal      = {GitHub repository},
+  howpublished = {\url{[https://github.com/ehooon/RWKV-RLHF](https://github.com/ehooon/RWKV-RLHF)}}
 }
+```
