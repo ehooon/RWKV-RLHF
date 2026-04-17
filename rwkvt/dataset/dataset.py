@@ -76,56 +76,50 @@ class MyDataset(Dataset):
             label = F.pad(token, (0, pad_len), value=-100)
             x = dix[:-1]
             y = label[1:]
-        # ================= DPO 专属数据流 =================
-        elif args.data_type == "dpo":
+        # ================= LiPO 专属数据流 =================
+        elif args.data_type in ["dpo", "lipo"]:
             ctx_len = args.ctx_len
             req_len = ctx_len + 1
-            
-            prompt_text = self.data[idx]['prompt']
-            chosen_text = self.data[idx]['chosen']
-            rejected_text = self.data[idx]['rejected']
 
+            sample = self.data[idx]
+            prompt_text = sample["prompt"]
             prompt_tokens = pipeline.encode(prompt_text)
-            chosen_tokens = pipeline.encode(chosen_text)
-            rejected_tokens = pipeline.encode(rejected_text)
 
-            full_chosen = prompt_tokens + chosen_tokens
-            full_rejected = prompt_tokens + rejected_tokens
+            # 兼容老 DPO 格式
+            if "chosen" in sample and "rejected" in sample:
+                responses = [sample["chosen"], sample["rejected"]]
+                best_idx = 0
+            else:
+                responses = sample["responses"]
+                best_idx = sample.get("best_idx", 0)
 
-            # 截断
-            full_chosen = full_chosen[:req_len]
-            full_rejected = full_rejected[:req_len]
-
-            # 辅助函数：将 seq 转换为 tensor 并 padding
             def pad_seq(seq, length, pad_val):
                 seq = torch.tensor(seq, dtype=torch.long)
                 if len(seq) < length:
                     return F.pad(seq, (0, length - len(seq)), value=pad_val)
                 return seq
 
-            # 1. 处理输入的 X (Padding 用 0)
-            chosen_pad = pad_seq(full_chosen, req_len, 0)
-            reject_pad = pad_seq(full_rejected, req_len, 0)
-            
-            # 2. 处理标签的 Y (构造 labels，Prompt 掩码设为 -100)
-            p_len = min(len(prompt_tokens), req_len)
-            
-            chosen_labels = full_chosen.copy()
-            chosen_labels[:p_len] = [-100] * p_len
-            
-            reject_labels = full_rejected.copy()
-            reject_labels[:p_len] = [-100] * p_len
+            x_list = []
+            y_list = []
 
-            # Labels 的 Padding 也用 -100
-            chosen_labels_pad = pad_seq(chosen_labels, req_len, -100)
-            reject_labels_pad = pad_seq(reject_labels, req_len, -100)
+            for resp_text in responses:
+                resp_tokens = pipeline.encode(resp_text)
+                full_seq = (prompt_tokens + resp_tokens)[:req_len]
 
-            # 返回错位后的 x 和 y (去掉了单独的 mask 返回)
+                p_len = min(len(prompt_tokens), len(full_seq))
+                labels = full_seq.copy()
+                labels[:p_len] = [-100] * p_len
+
+                seq_pad = pad_seq(full_seq, req_len, 0)
+                labels_pad = pad_seq(labels, req_len, -100)
+
+                x_list.append(seq_pad[:-1])
+                y_list.append(labels_pad[1:])
+
             return {
-                "chosen_x": chosen_pad[:-1], 
-                "chosen_y": chosen_labels_pad[1:], 
-                "reject_x": reject_pad[:-1], 
-                "reject_y": reject_labels_pad[1:]
+                "input_ids": torch.stack(x_list, dim=0),
+                "labels": torch.stack(y_list, dim=0),
+                "best_idx": torch.tensor(best_idx, dtype=torch.long)
             }
 
         else:

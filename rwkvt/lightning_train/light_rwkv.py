@@ -187,6 +187,52 @@ class RWKV(pl.LightningModule):
         token_logps = token_logps * mask
         return token_logps.sum(dim=-1)
     
+    def compute_reference_logps(self, flat_input_ids, flat_labels, B, K):
+        if hasattr(self.model, "disable_adapter"):
+            with self.model.disable_adapter():
+                with torch.no_grad():
+                    ref_logits = self(flat_input_ids)
+        else:
+            with torch.no_grad():
+                ref_logits = self(flat_input_ids)
+        ref_logps = self.get_batch_logps(ref_logits, flat_labels).view(B, K)
+        return ref_logps
+    
+    
+    def compute_lipo_loss(self, batch, log_name="lipo"):
+        input_ids = batch["input_ids"]   # [B, K, T]
+        labels = batch["labels"]         # [B, K, T]
+        best_idx = batch["best_idx"]     # [B]
+    
+        B, K, T = input_ids.shape
+        flat_input_ids = input_ids.view(B * K, T)
+        flat_labels = labels.view(B * K, T)
+    
+        policy_logits = self(flat_input_ids)
+        policy_logps = self.get_batch_logps(policy_logits, flat_labels).view(B, K)
+        ref_logps = self.compute_reference_logps(flat_input_ids, flat_labels, B, K)
+    
+        if self.args.data_type == "dpo":
+            beta = getattr(self.args, "dpo_beta", 0.1)
+        else:
+            beta = getattr(self.args, "lipo_beta", getattr(self.args, "dpo_beta", 0.1))
+    
+        rewards = beta * (policy_logps - ref_logps)
+        log_probs = F.log_softmax(rewards, dim=-1)
+        loss = -log_probs.gather(-1, best_idx.unsqueeze(-1)).squeeze(-1).mean()
+    
+        best_reward = rewards.gather(-1, best_idx.unsqueeze(-1)).squeeze(-1)
+        masked_rewards = rewards.clone()
+        masked_rewards.scatter_(1, best_idx.unsqueeze(-1), float("-inf"))
+        other_best = masked_rewards.max(dim=-1).values
+        other_best = torch.where(torch.isinf(other_best), torch.zeros_like(other_best), other_best)
+    
+        self.log(f"{log_name}/loss", loss, prog_bar=True, sync_dist=True)
+        self.log(f"{log_name}/best_reward", best_reward.mean(), sync_dist=True)
+        self.log(f"{log_name}/reward_margin", (best_reward - other_best).mean(), sync_dist=True)
+        return loss
+
+
     if os.environ.get("RWKV_TRAIN_TYPE") == 'infctx':
         def forward(self, idx,  last_shift_states: torch.Tensor,
                 last_wkv_states: torch.Tensor, attention_mask=None):
@@ -251,42 +297,11 @@ class RWKV(pl.LightningModule):
             
             # ================= DPO 训练分支 =================
             if args.data_type == 'dpo':
-                chosen_x, chosen_y = batch["chosen_x"], batch["chosen_y"]
-                reject_x, reject_y = batch["reject_x"], batch["reject_y"]
-                
-                # 1. 策略模型 (Policy) 前向传播
-                policy_chosen_logits = self(chosen_x)
-                policy_reject_logits = self(reject_x)
-                
-                policy_chosen_logps = self.get_batch_logps(policy_chosen_logits, chosen_y)
-                policy_reject_logps = self.get_batch_logps(policy_reject_logits, reject_y)
-                
-                # 2. 参考模型 (Reference) 前向传播 (通过关闭 PEFT 适配器实现)
-                with self.model.disable_adapter(): 
-                    with torch.no_grad():
-                        ref_chosen_logits = self(chosen_x)
-                        ref_reject_logits = self(reject_x)
-                        
-                        ref_chosen_logps = self.get_batch_logps(ref_chosen_logits, chosen_y)
-                        ref_reject_logps = self.get_batch_logps(ref_reject_logits, reject_y)
-                
-                # 3. 计算 DPO 损失
-                beta = getattr(args, 'dpo_beta', 0.1) # KL惩罚系数
-                
-                pi_logratios = policy_chosen_logps - policy_reject_logps
-                ref_logratios = ref_chosen_logps - ref_reject_logps
-                logits_diff = pi_logratios - ref_logratios
-                
-                # 标准 DPO Loss
-                loss = -F.logsigmoid(beta * logits_diff).mean()
-                
-                # 记录核心指标，方便 WandB 或 TensorBoard 监控
-                self.log("dpo/loss", loss, prog_bar=True, sync_dist=True)
-                self.log("dpo/chosen_reward", (beta * (policy_chosen_logps - ref_chosen_logps)).mean(), sync_dist=True)
-                self.log("dpo/reject_reward", (beta * (policy_reject_logps - ref_reject_logps)).mean(), sync_dist=True)
-                self.log("dpo/reward_margins", (beta * logits_diff).mean(), sync_dist=True)
-                
-                return loss
+                return self.compute_lipo_loss(batch, log_name="dpo")
+
+            elif args.data_type == 'lipo':
+                return self.compute_lipo_loss(batch, log_name="lipo")
+
 
             # ================= 原有的 SFT 分支 =================
             elif args.data_type == 'sft':

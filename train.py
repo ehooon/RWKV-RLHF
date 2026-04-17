@@ -18,12 +18,13 @@ if __name__ == "__main__":
     rank_zero_info("########## work in progress ##########")
 
     parser = ArgumentParser()
-
+    
     parser.add_argument("--load_model", default="", type=str)  # full path, with .pth
     parser.add_argument("--wandb", default="", type=str)  # wandb project name. if "" then don't use wandb
     parser.add_argument("--proj_dir", default="out", type=str)
     parser.add_argument("--random_seed", default="-1", type=int)
     parser.add_argument("--dpo_beta", default=0.1, type=float, help="DPO beta penalty parameter")
+    parser.add_argument("--lipo_beta", default=0.1, type=float, help="LiPO beta penalty parameter")
     parser.add_argument("--data_file", default="", type=str)
     parser.add_argument("--data_type", default="utf-8", type=str) #binidx / sft
     parser.add_argument("--vocab_size", default=0, type=int)  # vocab_size = 0 means auto (for char-level LM and .txt data)
@@ -214,7 +215,7 @@ if __name__ == "__main__":
         pass
 
 
-    assert args.data_type in ["utf-8", "utf-16le", "numpy", "binidx", "dummy", "uint16", "sft", 'jsonl','dpo']
+    assert args.data_type in ["utf-8", "utf-16le", "numpy", "binidx", "dummy", "uint16", "sft", 'jsonl','dpo','lipo']
 
     if args.lr_final == 0 or args.lr_init == 0:
         rank_zero_info("\n\nNote: lr_final = 0 or lr_init = 0. Using linear LR schedule instead.\n\n")
